@@ -1,0 +1,270 @@
+---
+title: "Strava Activities Analysis"
+author: "Thomas Sato"
+date: "November 2022"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(lubridate)
+
+activities <- read_csv("activities.csv")
+```
+
+## Initial Data Wrangling/Cleaning
+```{r}
+# Converting columns into a more usable format and selecting relevant columns
+activities_analysis <- activities %>%
+  mutate(Distance = Distance...17 * 0.000621371,
+         ElapsedTime = `Elapsed Time...6` / 60,
+         MovingTime = `Moving Time` / 60,
+         AvgSpeedE = ElapsedTime / Distance,
+         AvgSpeedM = MovingTime / Distance) %>%
+  select(`Activity Date`, `Activity Name`, `Activity Description`, ElapsedTime, 
+         Distance, MovingTime, `Max Speed`, AvgSpeedE, AvgSpeedM, `Elevation Gain`,
+         `Elevation Loss`, `Elevation Low`, `Elevation High`, `Max Grade`, `Average Grade`,
+         Calories)
+
+# Time zone issues:  Converting to my time zone (PST) and having a vector for the hour of day
+activities_analysis <- mutate(activities_analysis, hr_vector = ifelse(hour(mdy_hms(`Activity Date`)) <= 7,
+                                               hour(mdy_hms(`Activity Date`)) + 17,
+                                               hour(mdy_hms(`Activity Date`)) - 7))
+
+
+# Renaming Date column
+activities_analysis <- rename(activities_analysis, "Date" = "Activity Date")
+
+# Reformatting Date column
+activities_analysis$Date <- mdy_hms(activities_analysis$Date)
+
+# Isolating the year, the day of the year, and whether or not the run was in the morning or afternoon
+activities_analysis <- activities_analysis %>%
+  mutate(Year = year(Date), 
+         dayofyr = yday(Date), 
+         AMPM = ifelse(hr_vector < 12, "AM", "PM"))
+```
+
+## Date versus Time Spent Running
+```{r}
+ggplot(activities_analysis, aes(Date, ElapsedTime)) +
+  geom_line(color = "blue") +
+  ggtitle("Elapsed Time of Runs Over Time (2019-2022)") +
+  ylab("Elapsed Time (min)") +
+  theme_bw()
+
+ggplot(activities_analysis, aes(Date, MovingTime)) +
+  geom_line(color = "red") +
+  ggtitle("Moving Time of Runs Over Time (2019-2022)") +
+  ylab("Moving Time (min)") +
+  theme_bw()
+```
+
+There is one big spike in the graph around the middle of 2021, which I presume was my high school graduation day, where I ran 17 miles in the morning, then walked at graduation in the evening.
+
+```{r}
+filter(activities_analysis, MovingTime > 150)
+```
+This was not an easy run.
+
+```{r}
+# These apparently were my easy runs
+filter(activities_analysis, !is.na(str_match(activities_analysis$`Activity Name`, "Easy")))
+
+keywords <- c("Recovery", "Tempo", "Threshold", "Stuff")
+for(word in keywords) {
+  print(filter(activities_analysis, !is.na(str_match(activities_analysis$`Activity Name`, word))))
+}
+```
+I think it's fun to look for certain words in the titles of each of my runs, or the descriptions, too.  But I digress.
+
+```{r}
+fastactiv <- activities_analysis %>%
+  filter(AvgSpeedM < 10, AvgSpeedE < 25)
+
+ggplot(fastactiv, aes(dayofyr, AvgSpeedM)) +
+  geom_line(aes(color = AMPM)) +
+  facet_grid(Year ~ AMPM) +
+  xlab("Day of the Year") +
+  ylab("Average Moving Speed (min/mile)") +
+  theme(legend.position = "none") +
+  ggtitle("Average Moving Speed as a Function of the Day of the Year, by Time of Day", 
+          subtitle = "Filtered for Outliers") +
+  scale_color_manual(values = c("darkgoldenrod2", "darkgoldenrod4"))
+```
+
+Judging by this visualization, it seems that I have been running more frequently in the mornings in 2020, but more frequently in the afternoons/evenings in 2021 and 2022 based on how close the lines are to each other.  This inight is more easily seen in a bar graph.
+
+## Number of Runs per Year
+```{r, warning=FALSE}
+# nactyampm = Number of activities, by AM vs PM
+nactyampm <- activities_analysis %>%
+  group_by(Year, AMPM) %>%
+  summarize(n = n())
+
+ggplot(nactyampm) +
+  geom_bar(aes(Year, n, fill = AMPM), 
+           stat = "identity", 
+           position = "dodge") +
+  ylab("Number of Runs") +
+  ggtitle("Number of Runs per Year by Time of Day") +
+  labs(fill = "Time of Day") +
+  scale_fill_manual(values = c("darkgoldenrod2", "darkgoldenrod4")) +
+  theme_bw()
+```
+
+Interestingly, it seems that I have started running in the afternoons more often than the mornings as time has gone on.
+
+## Moving Time versus Calories (And Models)
+
+```{r}
+ggplot(activities_analysis, aes(MovingTime, Calories)) +
+  geom_point(color = "hotpink") +
+  ggtitle("Calories as a Function of Moving Time") +
+  xlab("Moving Time (mins)") +
+  theme_bw()
+
+ggplot(activities_analysis, aes(ElapsedTime, Calories)) +
+  geom_point(color = "brown") +
+  ggtitle("Calories as a Function of Elapsed Time") +
+  xlab("Elapsed Time (mins)") +
+  theme_bw()
+```
+
+There is a pretty clear significant linear relationship between moving time and calories.  I can fit a simple linear regression line and see how the line fits the data, and also interpret the relationship a little better.
+
+```{r}
+# Model for calories versus moving time
+caloriemodelmov <- lm(Calories ~ MovingTime, data = activities_analysis)
+summary(caloriemodelmov)
+
+# Model for calories versus elapsed time
+caloriemodelelapsed <- lm(Calories ~ ElapsedTime, data = activities_analysis)
+summary(caloriemodelelapsed)
+
+# Visualizations
+ggplot(activities_analysis, aes(MovingTime, Calories)) +
+  geom_point(color = "hotpink") +
+  geom_abline(intercept = caloriemodelmov$coefficients[1], 
+              slope = caloriemodelmov$coefficients[2]) +
+  ggtitle("Calories as a Function of Moving Time") +
+  xlab("Moving Time (mins)") +
+  theme_bw()
+
+ggplot(activities_analysis, aes(ElapsedTime, Calories)) +
+  geom_point(color = "brown") +
+  geom_abline(intercept = caloriemodelelapsed$coefficients[1], 
+              slope = caloriemodelelapsed$coefficients[2]) +
+  ggtitle("Calories as a Function of Elapsed Time") +
+  xlab("Elapsed Time (mins)") +
+  theme_bw()
+```
+
+From the models created, you can see that there was an increase of about 19.9 calories per minute in moving time, and an increase of about 16.7 calories per minute in elapsed time, and these results were statistically significant based on the low p-values.  The R-squared values for both were also decently high, but a little lower for elapsed time than moving time.  This suggests that the moving time is more of a factor when considering the amount of calories burned, which makes sense because the elapsed time will always be more than the moving time, but it varies more from run to run.  The difference in elapsed time and moving time is just the time spent paused or not running.  The number of calories burned during the paused times will be zero, but the elapsed time will still vary more, which is why the R-squared is a little lower.
+According to the Strava website, not only does moving time have an effect on the number of calories burned, but also the moving speed:
+
+```{r}
+# Model for calories versus average moving speed
+caloriemodelmspd <- lm(Calories ~ AvgSpeedM, data = activities_analysis)
+summary(caloriemodelmspd)
+
+# Model for calories versus average elapsed speed
+caloriemodelespd <- lm(Calories ~ AvgSpeedE, data = activities_analysis)
+summary(caloriemodelespd)
+```
+The R-squared value for the average moving speed was 0.008, and the value for average elapsed speed was 0.024.  These are very low R-squared values, and I think part of the story is told by visualizing the data.
+
+```{r}
+ggplot(activities_analysis, aes(AvgSpeedM, Calories)) +
+  geom_point(color = "darkred") +
+  geom_abline(intercept = caloriemodelmspd$coefficients[1],
+              slope = caloriemodelmspd$coefficients[2]) +
+  ggtitle("Calories as a Function of Average Speed (Moving)") +
+  xlab("Average Speed (mins/mile)") +
+  theme_bw()
+
+ggplot(activities_analysis, aes(AvgSpeedE, Calories)) +
+  geom_point(color = "darkgreen") +
+  geom_abline(intercept = caloriemodelespd$coefficients[1],
+              slope = caloriemodelespd$coefficients[2]) +
+  ggtitle("Calories as a Function of Average Speed (Elapsed)") +
+  xlab("Average Speed (mins/mile)") +
+  theme_bw()
+```
+
+That one outlier of a very slow speed is going to significantly skew the regression line.
+We will use fastactiv, which is the dataset filtered for slow outliers, in order to make these visualizations.
+
+```{r}
+# These models factor in outliers from the too slow runs
+outliers_calories_e <- lm(Calories ~ AvgSpeedE, data = fastactiv)
+summary(outliers_calories_e)
+outliers_calories_m <- lm(Calories ~ AvgSpeedM, data = fastactiv)
+summary(outliers_calories_m)
+
+ggplot(fastactiv, aes(AvgSpeedM, Calories)) +
+  geom_point(color = "darkred") +
+  geom_abline(intercept = caloriemodelmspd$coefficients[1],
+              slope = caloriemodelmspd$coefficients[2]) +
+  geom_abline(intercept = outliers_calories_m$coefficients[1],
+              slope = outliers_calories_m$coefficients[2],
+              color = "red") +
+  ggtitle("Calories as a Function of Average Speed (Moving)") +
+  xlab("Average Speed (mins/mile)") +
+  theme_bw()
+
+ggplot(fastactiv, aes(AvgSpeedE, Calories)) +
+  geom_point(color = "darkgreen") +
+  geom_abline(intercept = caloriemodelespd$coefficients[1],
+              slope = caloriemodelespd$coefficients[2]) +
+  geom_abline(intercept = outliers_calories_e$coefficients[1],
+              slope = outliers_calories_e$coefficients[2],
+              color = "red") +
+  ggtitle("Calories as a Function of Average Speed (Elapsed)") +
+  xlab("Average Speed (mins/mile)") +
+  theme_bw()
+```
+
+The red line is the corrected line of best fit for the outliers.
+The interesting thing here is the fact that the moving time p-value, before filtering out outliers, was relatively significant, but after filtering for outliers, it is not significant at all.  You would think that moving time alone would be a significant factor in determining the amount of calories burned in a given run, but I suspect that there may be an interaction effect between moving time and moving speed.
+
+```{r}
+caloriemodelint <- lm(Calories ~ MovingTime * AvgSpeedM, data = fastactiv)
+summary(caloriemodelint)
+```
+The R-squared value from the Calories versus Moving Time model increased from 0.9565 to 0.9833
+The interaction model suggests that an increase in one minute of moving time is associated with an increase in energy expenditure by 42.18 + (-2.86 * Average Moving Speed) calories.  Likewise, an increase in one minute per mile in average moving speed is associated with an increase in energy expenditure by -0.86 + (-2.86 * Moving Time) Calories.
+
+I was curious to see how the interaction model performs compared to just the model that calculates based on moving time and not on moving speed.  I created a function in order to test the models against each other in individual cases:
+```{r}
+calsf <- function(index) {
+  p1 <- activities_analysis[index,]$MovingTime
+  p2 <- activities_analysis[index,]$AvgSpeedM
+  actualcalsburned <- activities_analysis[index,]$Calories
+  interactionpred <- 18.3325 + (42.1752 * p1) + (-0.8559 * p2) + (-2.8583 * p1 * p2)
+  movtimpred <- 19.9026 * p1
+  return(data.frame(interactionpred, movtimpred, actualcalsburned))
+}
+
+rbind("400" = calsf(400), "300" = calsf(300), "100" = calsf(100))
+```
+For most of the values tested, the interaction model definitely seems a lot more accurate, but for a select few, the SLR model was closer to the actual amount of calories burned.
+Now I wanted to compare between each run and see which method had a higher percentage of being more accurate when compared with the other.
+
+```{r}
+p <- rep(NA, nrow(activities_analysis))
+for (i in 1:nrow(activities_analysis)) {
+  residint <- abs(calsf(i)$actualcalsburned - calsf(i)$interactionpred)
+  residtime <- abs(calsf(i)$actualcalsburned - calsf(i)$movtimpred)
+  if (residint > residtime) {
+    p[i] <- T
+  } else {
+    p[i] <- F
+  }
+}
+sum(p) / nrow(activities_analysis)
+```
+It looks like for 21.51% of the runs the moving time model was more accurate than the interaction model.  I think that it is safe to say that the interaction model is fairly more accurate then.
